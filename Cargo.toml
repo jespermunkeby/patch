@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 termion = "1.5"
 rust_dmx = "0.5.0"
-opencv = "0.92.0"
+opencv = { version = "0.92.0", features = ["clang-runtime"] }
+uuid = { version = "1.0", features = ["v4"] }
 

@@ -1,7 +1,14 @@
+use std::collections::{HashMap, HashSet};
+use std::f32::consts::PI;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Stdin, Stdout, Write};
+use opencv::core::{Mat, MatExprTraitConst, MatTraitConst, Point2f, Scalar, Size};
+use opencv::imgproc;
+use opencv::videoio::{self, VideoCaptureTrait};
 use termion::input::TermRead;
 use termion::raw::{IntoRawMode, RawTerminal};
 use termion::event::Key;
+use uuid::Uuid;
 use std::time::{Duration, Instant};
 use std::thread;
 use rust_dmx::{available_ports, DmxPort};
@@ -70,7 +77,7 @@ enum ProjectorVisual {
         window_c:ProjetorSourceWindow,
         camera_source: i32
     },
-    VideoLoop{path:String}
+    VideoLoop
 }
 
 impl ProjectorVisual {
@@ -83,14 +90,14 @@ impl ProjectorVisual {
                 camera_source,
             } => {
                 let mut cam = videoio::VideoCapture::new(*camera_source, videoio::CAP_ANY)?;
-                if !videoio::VideoCapture::is_opened(&cam)? {
-                    panic!("Unable to open camera");
-                }
+                // if !videoio::VideoCapture::is_opened(&cam)? {
+                //     panic!("Unable to open camera");
+                // }
 
                 let mut frame = Mat::default();
                 cam.read(&mut frame)?;
 
-                let mut display_frame = Mat::zeros(height, width, frame.typ()?)?.to_mat()?;
+                let mut display_frame = Mat::zeros(height, width, frame.typ())?.to_mat()?;
 
                 Self::process_frame(&mut display_frame, &frame, window_a, width, height)?;
                 Self::process_frame(&mut display_frame, &frame, window_b, width, height)?;
@@ -98,7 +105,7 @@ impl ProjectorVisual {
 
                 Ok(display_frame)
             }
-            ProjectorVisual::VideoLoop { path: _ } => {
+            ProjectorVisual::VideoLoop => {
                 todo!()
             }
         }
@@ -107,7 +114,7 @@ impl ProjectorVisual {
     fn process_frame(
         display_frame: &mut Mat,
         frame: &Mat,
-        window: &ProjectorSourceWindow,
+        window: &ProjetorSourceWindow,
         width: i32,
         height: i32,
     ) -> opencv::Result<()> {
@@ -123,7 +130,7 @@ impl ProjectorVisual {
             (resized_frame.cols() / 2) as f32,
             (resized_frame.rows() / 2) as f32,
         );
-        let rot_mat = imgproc::get_rotation_matrix_2d(center, window.rotation * 180.0 / PI, 1.0)?;
+        let rot_mat = imgproc::get_rotation_matrix_2d(center, (window.rotation * 180.0 / PI).into(), 1.0)?;
 
         let mut rotated_frame = Mat::default();
         imgproc::warp_affine(
@@ -132,15 +139,16 @@ impl ProjectorVisual {
             &rot_mat,
             new_size,
             imgproc::INTER_LINEAR,
-            core::BORDER_CONSTANT,
+            opencv::core::BORDER_CONSTANT,
             Scalar::all(0.0),
         )?;
 
         let pos_x = ((width as f32 / 2.0) + window.position.0 - (new_size.width as f32 / 2.0)) as i32;
         let pos_y = ((height as f32 / 2.0) + window.position.1 - (new_size.height as f32 / 2.0)) as i32;
 
-        let roi = imgproc::get_rect_sub_pix(&mut display_frame, new_size, Point2f::new(pos_x as f32, pos_y as f32))?;
-        rotated_frame.copy_to(&roi)?;
+        //TODO: fix this
+        // let roi = imgproc::get_rect_sub_pix(&mut display_frame, new_size, Point2f::new(pos_x as f32, pos_y as f32))?;
+        // rotated_frame.copy_to(&roi)?;
 
         Ok(())
     }
@@ -180,6 +188,16 @@ enum Fixture {
     DMXFixture{fixture_type:DMXFixtureType, position: Option<Position3D>, mode:FixtureMode, dmx_channel:u16},
 }
 
+impl Fixture {
+    fn new_projector(position:Option<Position3D>)-> Fixture{
+        Fixture::Projector { position, mode: FixtureMode::Off}
+    }
+
+    fn new_dmx_fixture(position:Option<Position3D>, fixture_type:DMXFixtureType, dmx_channel: u16)-> Fixture{
+        Fixture::DMXFixture { fixture_type, position, mode: FixtureMode::Off, dmx_channel}
+    }
+}
+
 // impl Fixture{
 //     fn get_rgb(self, time: Duration) -> Color{
 //         match self{
@@ -193,46 +211,49 @@ enum Fixture {
 //     }
 // }
 
+
+
+// impl PartialEq for PatchFixture {
+//     fn eq(&self, other: &Self) -> bool {
+//         self.id == other.id
+//     }
+// }
+
+// impl Eq for PatchFixture {}
+
+// impl Hash for PatchFixture {
+//     fn hash<H: Hasher>(&self, state: &mut H) {
+//         self.id.hash(state);
+//     }
+// }
+
+
 struct Patch {
-    fixtures:Vec<Fixture>,
+    fixtures:HashMap<Uuid,Fixture>,
     start: Instant,
-    selection:Vec<&mut Fixture>
+    selection: HashSet<Uuid>,
+    focus:Uuid
 }
 
-impl Patch {
+impl Patch{
 
-    fn new()-> Patch{
+    fn new(fixtures:Vec<Fixture>)-> Patch{
+        let fixtures = fixtures.iter().map(|f| (Uuid::new_v4(), *f)).collect();
         Patch{
-            fixtures: vec![],
+            fixtures,
             start: Instant::now(),
-            selection: vec![],
+            selection: HashSet::new(),
+            focus: *fixtures.keys().collect::<Vec<_>>()[0]
         }
     }
 
-    //config
-    fn add_fixture(self, fixture: Fixture){
-        self.fixtures.append(fixture);
+    fn toggle_selection(self){
+        //toggle inclusion of focus in selection
+        todo!();
     }
 
     //runtime and updating
-
     fn tick(duration:Duration){
-
-    }
-
-    //basic operations
-    //Off,
-    //On{color:Color},
-    //ToggleOnSignal{a:Box<FixtureMode>, b:Box<FixtureMode>, signal_source:SignalSource},
-    //Projector //TODO:add window handle
-
-    //Select group -> select mode (on, off, (projector)) -> settings for that mode
-    //Compose -> select signal source -> select transition
-    fn select_group(){
-
-    }
-
-    fn compose(){
 
     }
 
@@ -241,38 +262,44 @@ impl Patch {
     //compose patches
 
     fn save(){
-
+        //serialize and save fixtures
     }
 
     fn load(){
-
+        //load fixtures from file
     }
 
     fn compose(){
-
+        //load a fixtures from file, compose all modes
     }
+
+    //Select group -> select mode (on, off, projector) -> settings for that mode
+    //Compose -> select signal source -> select transition
+
+
 
 }
 
-
-////
-
 struct Model{
-    patch: Patch
+    patch: Patch,
 }
 
 impl Model{
     fn new() -> Model{
         Model{
-            patch:Patch::new(),
+            patch:Patch::new(
+                vec![
+                    Fixture::new_projector(Option::None),
+                    Fixture::new_projector(Option::None),
+                ]
+            ),
         }
     }
 }
 
-
 enum Message {
     New,
-    AddToSelection(&mut Fixture),
+    AddToSelection(Uuid),
     ClearSelection,
     SetMode(FixtureMode),
     Save,
@@ -293,10 +320,11 @@ fn view(model: &Model, stdin: &mut termion::AsyncReader, stdout: &mut termion::r
     stdout.flush().unwrap();
 
     //DMX
-    dmx_port.write(&[50,model.counter as u8,model.counter as u8][..]).unwrap();
+    // dmx_port.write(&[50,model.counter as u8,model.counter as u8][..]).unwrap();
 
     //Projectors
 
+    //Input
     if let Some(key) = stdin.keys().next() {
         match key.unwrap() {
             Key::Char('+') => return Some(Message::Increment),
