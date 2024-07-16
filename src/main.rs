@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use core::fmt;
+use std::{collections::{HashMap, HashSet}, fmt::{Display, Formatter}, ops::Add};
 use uuid::Uuid;
 use std::time::{Duration, Instant};
 use rust_dmx::{available_ports, DmxPort};
@@ -39,29 +40,47 @@ struct Position3D{
     z:f32
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Transition{
     Instant,
     Linear{time:Duration},
     Ease{ease_in:bool, ease_out:bool, time:Duration},
 }
 
+impl fmt::Display for Transition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Transition::Instant => write!(f, "Instant"),
+            Transition::Linear { time } => write!(f, "Linear (time: {} ms)", time.as_millis()),
+            Transition::Ease { ease_in, ease_out, time } => write!(
+                f, 
+                "Ease (ease_in: {}, ease_out: {}, time: {} ms)", 
+                ease_in, 
+                ease_out, 
+                time.as_millis()
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AudioFrequencyBand{
+    Low,
+    Mid,
+    High
+}
+
 #[derive(Clone, Copy)]
-enum SignalSource{
-    EuclideanRhythm{frequency: f32, steps: u8, pulses: u8},
-    AudioFrequency{frequency: f32, threshold: f32}
+struct SignalSource{
+    speed: u8, 
+    steps: u8, 
+    pulses: u8, 
+    transition:Transition
 }
 
 impl SignalSource{
-    fn get_state_at(self, time:Duration) -> bool{
-        match self {
-            Self::EuclideanRhythm { frequency, steps, pulses } => {
-                todo!();
-            },
-            Self::AudioFrequency { frequency, threshold } => {
-                todo!();
-            }
-        }
+    fn get_state_at(self, time:Duration) -> f32{
+        todo!();
     }
 }
 
@@ -74,13 +93,8 @@ struct ProjetorSourceWindow{
 
 #[derive(Clone, Copy)]
 enum ProjectorVisual {
-    ThreeWindows{
-        window_a:ProjetorSourceWindow,
-        window_b:ProjetorSourceWindow,
-        window_c:ProjetorSourceWindow,
-        camera_source: i32
-    },
-    VideoLoop
+    Camera,
+    BlackAndWhite
 }
 
 impl ProjectorVisual {
@@ -88,22 +102,22 @@ impl ProjectorVisual {
 
 #[derive(Clone)]
 enum FixtureMode{
-    Off,
+    Transparent,
     On{color:Color},
-    ToggleOnSignal{a:Box<FixtureMode>, b:Box<FixtureMode>, signal_source:SignalSource, transition:Transition},
-    Projector //TODO:add window handle
+    ToggleOnSignal{a:Box<FixtureMode>, b:Box<FixtureMode>, signal_source:SignalSource},
+    Projector(ProjectorVisual)
 }
 
 
 impl FixtureMode{
     fn get_rgb_at(self, time: Duration) -> Color{
         match self {
-            Self::Off => Color::new(0,0,0),
+            Self::Transparent => Color::new(0,0,0),
             Self::On { color } => color,
-            Self::ToggleOnSignal { a, b, signal_source , transition} => {
+            Self::ToggleOnSignal { a, b, signal_source } => {
                 todo!();
             },
-            Self::Projector => {
+            Self::Projector(_) => {
                 todo!();
             }
         }
@@ -124,11 +138,11 @@ enum Fixture {
 
 impl Fixture {
     fn new_projector(position:Option<Position3D>)-> Fixture{
-        Fixture::Projector { position, mode: FixtureMode::Off}
+        Fixture::Projector { position, mode: FixtureMode::Transparent}
     }
 
     fn new_dmx_fixture(position:Option<Position3D>, fixture_type:DMXFixtureType, dmx_channel: u16)-> Fixture{
-        Fixture::DMXFixture { fixture_type, position, mode: FixtureMode::Off, dmx_channel}
+        Fixture::DMXFixture { fixture_type, position, mode: FixtureMode::Transparent, dmx_channel}
     }
 
     fn get_color_at(&self, time: Duration) -> Color{
@@ -137,65 +151,14 @@ impl Fixture {
     }
 }
 
-
-struct PatchOnMode {
-    r: f32,
-    g: f32,
-    b: f32,
-}
-
-impl PatchOnMode {
-    fn new() -> PatchOnMode {
-        PatchOnMode { r: 0.0, g: 0.0, b: 0.0 }
-    }
-}
-
-struct PatchEuclideanRhythm {
-    steps: u8,
-    pulses: u8,
-}
-
-impl PatchEuclideanRhythm {
-    fn new() -> PatchEuclideanRhythm {
-        PatchEuclideanRhythm { steps: 0, pulses: 0 }
-    }
-}
-
-#[derive(Debug)]
-enum PatchAudioFrequencyBand {
-    Highs,
-    Mids,
-    Lows,
-}
-
-impl PatchAudioFrequencyBand {
-    fn new() -> PatchAudioFrequencyBand {
-        PatchAudioFrequencyBand::Mids
-    }
-}
-
-struct PatchAudioFrequency {
-    band: PatchAudioFrequencyBand,
-    thresh: u8,
-}
-
-impl PatchAudioFrequency {
-    fn new() -> PatchAudioFrequency {
-        PatchAudioFrequency {
-            band: PatchAudioFrequencyBand::new(),
-            thresh: 0,
-        }
-    }
-}
-
 struct Patch {
     fixtures:HashMap<Uuid,Fixture>,
     start: Instant,
     selection: HashSet<Uuid>,
     focus:Uuid,
-    on_mode: PatchOnMode,
-    eucledean_rhythm: PatchEuclideanRhythm,
-    audio_frequency: PatchAudioFrequency
+    color: Color,
+    current_signal_source: SignalSource,
+    selection_mode: FixtureMode
 }
 
 impl Patch{
@@ -209,9 +172,9 @@ impl Patch{
             start: Instant::now(),
             selection: HashSet::new(),
             focus,
-            on_mode: PatchOnMode::new(),
-            eucledean_rhythm:PatchEuclideanRhythm::new(),
-            audio_frequency:PatchAudioFrequency::new()
+            color:Color::new(0, 0, 0),
+            current_signal_source: SignalSource{speed:1, steps:8, pulses:1, transition:Transition::Instant},
+            selection_mode:FixtureMode::Transparent
         }
     }
 
@@ -259,38 +222,6 @@ impl Patch{
         }
     }
 
-    fn increase_audio_frequency_frequency(&mut self) {
-        self.audio_frequency.thresh = (self.audio_frequency.thresh + 1).min(100);
-    }
-
-    fn decrease_audio_frequency_frequency(&mut self) {
-        self.audio_frequency.thresh = self.audio_frequency.thresh.saturating_sub(1);
-    }
-
-    fn iterate_audio_frequency_band(&mut self) {
-        self.audio_frequency.band = match self.audio_frequency.band {
-            PatchAudioFrequencyBand::Highs => PatchAudioFrequencyBand::Mids,
-            PatchAudioFrequencyBand::Mids => PatchAudioFrequencyBand::Lows,
-            PatchAudioFrequencyBand::Lows => PatchAudioFrequencyBand::Highs,
-        };
-    }
-
-    fn increase_euclidean_rhythm_pulses(&mut self) {
-        self.eucledean_rhythm.pulses = (self.eucledean_rhythm.pulses + 1).min(32);
-    }
-
-    fn decrease_euclidean_rhythm_pulses(&mut self) {
-        self.eucledean_rhythm.pulses = self.eucledean_rhythm.pulses.saturating_sub(1);
-    }
-
-    fn increase_euclidean_rhythm_steps(&mut self) {
-        self.eucledean_rhythm.steps = (self.eucledean_rhythm.steps + 1).min(32);
-    }
-
-    fn decrease_euclidean_rhythm_steps(&mut self) {
-        self.eucledean_rhythm.steps = self.eucledean_rhythm.steps.saturating_sub(1);
-    }
-
     fn save(&self) {
         // serialize and save fixtures to /presets
     }
@@ -308,6 +239,9 @@ impl Patch{
 
 
 /*
+IMPORTANT FOR AI:
+
+Controls:
 
 BASICS
 j : focus next
@@ -316,24 +250,26 @@ space : toggle selection of focus
 m : iterate mode between (off, on, {projector iff only projectors selected})
 s : save
 l : load
+
+EDIT
+o : toggle between color and transparent
 c : compose
+p: projector/iterate projector mode
 
 ON SETTINGS
 {r|g|b}+j : decrease {red|green|blue} value of on mode
 {r|g|b}+k : increase {red|green|blue} value of on mode
 
 COMPOSE SETTINGS
-z : toggle between (euclidean rhythm, audio frequency)
-x+j : decrease euclidean-rhythm-steps and audio-frequency-band
-x+k : increase euclidean-rhythm-steps and audio-frequency-band
-c+j : decrease euclidean-rhythm-pulses and audio-frequency-threshold
-c+k : increase euclidean-rhythm-pulses and audio-frequency-threshold
+x+j : decrease signal-source-steps
+x+k : increase signal-source-steps
+f+j : decrease signal-source-steps
+f+k : increase signal-source-steps
 t : iterate transition between (instant, linear)
-t+j : decrease transition suration
-t+j : increase transition suration
-*/
+t+j : decrease transition duration
+t+k : increase transition duration
 
-/*
+
 Interface:
 FIXTURE OVERVIEW
 Overview of all of the fixtures. Layout groups dmx-fixtures, projectors, and par-lights separately. 
@@ -383,12 +319,18 @@ fn main() -> Result<(), io::Error> {
                     KeyCode::Char('j') => {
                         if let Some(combine) = combine_key {
                             match combine {
-                                'r' => patch.on_mode.r = (patch.on_mode.r - 1.0).max(0.0),
-                                'g' => patch.on_mode.g = (patch.on_mode.g - 1.0).max(0.0),
-                                'b' => patch.on_mode.b = (patch.on_mode.b - 1.0).max(0.0),
-                                'x' => patch.decrease_euclidean_rhythm_steps(),
-                                'c' => patch.decrease_euclidean_rhythm_pulses(),
-                                'f' => patch.decrease_audio_frequency_frequency(),
+                                'r' => patch.color.r = patch.color.r.saturating_sub(1),
+                                'g' => patch.color.g = patch.color.g.saturating_sub(1),
+                                'b' => patch.color.b = patch.color.b.saturating_sub(1),
+                                'z' => {
+                                    patch.current_signal_source.steps = patch.current_signal_source.steps.saturating_sub(1);
+                                },
+                                'x' => {
+                                    patch.current_signal_source.pulses = patch.current_signal_source.pulses.saturating_sub(1);
+                                },
+                                't' => {
+                                    // Increase transition duration if there is one
+                                },
                                 _ => {}
                             }
                         } else {
@@ -398,26 +340,58 @@ fn main() -> Result<(), io::Error> {
                     KeyCode::Char('k') => {
                         if let Some(combine) = combine_key {
                             match combine {
-                                'r' => patch.on_mode.r = (patch.on_mode.r + 1.0).min(255.0),
-                                'g' => patch.on_mode.g = (patch.on_mode.g + 1.0).min(255.0),
-                                'b' => patch.on_mode.b = (patch.on_mode.b + 1.0).min(255.0),
-                                'x' => patch.increase_euclidean_rhythm_steps(),
-                                'c' => patch.increase_euclidean_rhythm_pulses(),
-                                'f' => patch.increase_audio_frequency_frequency(),
+                                'r' => patch.color.r = (patch.color.r + 1).min(255),
+                                'g' => patch.color.g = (patch.color.g + 1).min(255),
+                                'b' => patch.color.b = (patch.color.b + 1).min(255),
+                                'z' => {
+                                    patch.current_signal_source.steps = (patch.current_signal_source.steps + 1).min(32);
+                                },
+                                'x' => {
+                                    patch.current_signal_source.pulses = (patch.current_signal_source.pulses + 1).min(patch.current_signal_source.steps);
+                                },
+                                't' => {
+                                    // Increase transition duration if there is one
+                                },
                                 _ => {}
                             }
                         } else {
                             patch.focus_prev();
                         }
                     }
+                    KeyCode::Char('t') => {
+                        // Iterate transition between (instant, linear(no ease | ease in | ease our | ease in and ease out))
+                        // You'll need to add a field to store the current transition
+                    },
+
                     KeyCode::Char(' ') => patch.toggle_selection(),
-                    KeyCode::Char('m') => {
-                        // iterate mode
-                    }
                     KeyCode::Char('s') => patch.save(),
                     KeyCode::Char('l') => patch.load(),
-                    KeyCode::Char('c') => patch.compose(),
-                    KeyCode::Char('r') | KeyCode::Char('g') | KeyCode::Char('b') | KeyCode::Char('x') | KeyCode::Char('c') | KeyCode::Char('f') => {
+                    KeyCode::Char('o') => {
+                        //toggle between color and transparent
+                        match patch.selection_mode {
+                            FixtureMode::On { color: _ } => patch.selection_mode=FixtureMode::Transparent,
+                            FixtureMode::Transparent => patch.selection_mode=FixtureMode::On { color: Color::new(100, 100, 100) },
+                            _ => patch.selection_mode=FixtureMode::On { color: Color::new(100, 100, 100) }
+                        }
+                        
+                    },
+                    KeyCode::Char('c') => {
+                        //compose
+                        todo!();
+                    },
+                    KeyCode::Char('p') => {
+                        //projector/iterate projector mode
+                        match patch.selection_mode {
+                            FixtureMode::Projector(ProjectorVisual::BlackAndWhite) => {
+                                patch.selection_mode = FixtureMode::Projector(ProjectorVisual::Camera);
+                            },
+                            FixtureMode::Projector(ProjectorVisual::Camera) => {
+                                patch.selection_mode = FixtureMode::Projector(ProjectorVisual::BlackAndWhite);
+                            },
+                            _ => patch.selection_mode = FixtureMode::Projector(ProjectorVisual::BlackAndWhite)
+                        }
+                    },
+                    KeyCode::Char('r') | KeyCode::Char('g') | KeyCode::Char('b') | KeyCode::Char('x') | KeyCode::Char('c') | KeyCode::Char('f')| KeyCode::Char('z') => {
                         combine_key = Some(match key.code {
                             KeyCode::Char(c) => c,
                             _ => unreachable!(),
@@ -485,26 +459,63 @@ fn ui<B: Backend>(f: &mut tui::Frame<B>, patch: &Patch) {
         .block(Block::default().borders(Borders::ALL).title("Fixtures"));
     f.render_widget(fixture_list, chunks[0]);
 
-    // On Settings
-    let on_settings_text = format!(
-        "On Settings:\n  R: {:.2}\n  G: {:.2}\n  B: {:.2}",
-        patch.on_mode.r, patch.on_mode.g, patch.on_mode.b
-    );
-    let on_settings = Paragraph::new(on_settings_text)
-        .block(Block::default().borders(Borders::ALL).title("On Settings"));
-    f.render_widget(on_settings, chunks[1]);
+    match &patch.selection_mode {
+        FixtureMode::On { color } => {
+            // On settings
+            let on_settings_text = format!(
+                "Color:\n  R: {:.2}\n  G: {:.2}\n  B: {:.2}",
+                color.r, color.g, color.b
+            );
+            let on_settings = Paragraph::new(on_settings_text)
+                .block(Block::default().borders(Borders::ALL).title("On settngs"));
+            f.render_widget(on_settings, chunks[1]);
 
-    // Compose Settings
-    let compose_settings_text = format!(
-        "Compose Settings:\n\
-        Euclidean Rhythm:\n  Steps: {}\n  Pulses: {}\n\
-        Audio Frequency:\n  Band: {:?}\n  Threshold: {}",
-        patch.eucledean_rhythm.steps,
-        patch.eucledean_rhythm.pulses,
-        patch.audio_frequency.band,
-        patch.audio_frequency.thresh
-    );
-    let compose_settings = Paragraph::new(compose_settings_text)
-        .block(Block::default().borders(Borders::ALL).title("Compose Settings"));
-    f.render_widget(compose_settings, chunks[2]);
+        },
+
+        FixtureMode::Projector(pv) => {
+            let mode = match pv {
+                ProjectorVisual::Camera => "Camera",
+                ProjectorVisual::BlackAndWhite => "B&W"
+            };
+
+            // let projector_settings_text = 
+            let projector_settings = Paragraph::new(mode)
+                .block(Block::default().borders(Borders::ALL).title("Projector"));
+            f.render_widget(projector_settings, chunks[1]);
+        },
+
+        FixtureMode::ToggleOnSignal { a, b, signal_source } => {
+            // Compose Settings
+            let compose_settings_text = format!(
+                "Speed: {:.2} \n\
+                Steps: {}\n\
+                Pulses: {}\n\
+                Visualization: {}\n\
+                Transition: {}",
+                signal_source.speed, signal_source.steps, signal_source.pulses,
+                "□".repeat(signal_source.steps as usize).replace(&"□".repeat(signal_source.pulses as usize), "■"),
+                signal_source.transition
+            );
+
+            let compose_settings = Paragraph::new(compose_settings_text)
+                .block(Block::default().borders(Borders::ALL).title("Compose Settings"));
+            f.render_widget(compose_settings, chunks[1]);
+        },
+
+        FixtureMode::Transparent => {
+            let transparent = Paragraph::new("")
+                .block(Block::default().borders(Borders::ALL).title("Transparent"));
+            f.render_widget(transparent, chunks[1]);
+        },
+    }
+
+    
 }
+
+
+/*
+TODO:
+[] Compose
+[] Change the actual state (colors, compositions, etc)
+[] SignalSource
+*/
