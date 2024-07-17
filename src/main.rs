@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::{HashMap, HashSet}, fmt::{Display, Formatter}, ops::Add};
+use std::{collections::{HashMap, HashSet}, fmt::{Display, Formatter}, fs::File, ops::Add};
 use uuid::Uuid;
 use std::time::{Duration, Instant};
 use rust_dmx::{available_ports, DmxPort};
@@ -20,7 +20,7 @@ use crossterm::{
 
 use std::io;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Color{
     r:u8,
     g:u8,
@@ -43,21 +43,18 @@ struct Position3D{
 #[derive(Clone, Copy, Debug)]
 enum Transition{
     Instant,
-    Linear{time:Duration},
-    Ease{ease_in:bool, ease_out:bool, time:Duration},
+    Interpolate{ease_in:bool, ease_out:bool},
 }
 
 impl fmt::Display for Transition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Transition::Instant => write!(f, "Instant"),
-            Transition::Linear { time } => write!(f, "Linear (time: {} ms)", time.as_millis()),
-            Transition::Ease { ease_in, ease_out, time } => write!(
+            Transition::Interpolate { ease_in, ease_out} => write!(
                 f, 
-                "Ease (ease_in: {}, ease_out: {}, time: {} ms)", 
+                "Interpolate (ease_in: {}, ease_out: {})", 
                 ease_in, 
                 ease_out, 
-                time.as_millis()
             ),
         }
     }
@@ -71,11 +68,11 @@ enum AudioFrequencyBand{
 }
 
 #[derive(Clone, Copy)]
-struct SignalSource{
+struct SignalSource {
     speed: u8, 
     steps: u8, 
     pulses: u8, 
-    transition:Transition
+    transition: Transition
 }
 
 impl SignalSource{
@@ -91,7 +88,7 @@ struct ProjetorSourceWindow{
     rotation: f32
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum ProjectorVisual {
     Camera,
     BlackAndWhite
@@ -122,6 +119,16 @@ impl FixtureMode{
             }
         }
     } 
+
+    fn mode_equals(&self, other: &FixtureMode) -> bool {
+        match (self, other) {
+            (FixtureMode::Transparent, FixtureMode::Transparent) => true,
+            (FixtureMode::On { color: c1 }, FixtureMode::On { color: c2 }) => c1 == c2,
+            (FixtureMode::ToggleOnSignal { .. }, FixtureMode::ToggleOnSignal { .. }) => true,
+            (FixtureMode::Projector(v1), FixtureMode::Projector(v2)) => v1 == v2,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -147,7 +154,14 @@ impl Fixture {
 
     fn get_color_at(&self, time: Duration) -> Color{
         //TODO
-        Color::new(200, 10, 50)
+        Color::new(200, 200, 50)
+    }
+
+    fn get_mode(&self) -> &FixtureMode {
+        match self {
+            Fixture::Projector { mode, .. } => mode,
+            Fixture::DMXFixture { mode, .. } => mode,
+        }
     }
 }
 
@@ -156,9 +170,7 @@ struct Patch {
     start: Instant,
     selection: HashSet<Uuid>,
     focus:Uuid,
-    color: Color,
-    current_signal_source: SignalSource,
-    selection_mode: FixtureMode
+    selection_mode: Option<FixtureMode>
 }
 
 impl Patch{
@@ -172,10 +184,79 @@ impl Patch{
             start: Instant::now(),
             selection: HashSet::new(),
             focus,
-            color:Color::new(0, 0, 0),
-            current_signal_source: SignalSource{speed:1, steps:8, pulses:1, transition:Transition::Instant},
-            selection_mode:FixtureMode::Transparent
+            selection_mode:None,
         }
+    }
+
+    fn update_selection_mode(&mut self) {
+        if self.selection.is_empty() {
+            self.selection_mode = None;
+            return;
+        }
+
+        let first_id = self.selection.iter().next().unwrap();
+        let first_mode = self.fixtures[first_id].get_mode().clone();
+        
+        if self.selection.iter().all(|id| self.fixtures[id].get_mode().mode_equals(&first_mode)) {
+            self.selection_mode = Some(first_mode);
+        } else {
+            self.selection_mode = None;
+        }
+    }
+
+    fn modify_selection(&mut self) {
+        if let Some(new_mode) = self.selection_mode.clone() {
+            for id in &self.selection {
+                if let Some(fixture) = self.fixtures.get_mut(id) {
+                    match fixture {
+                        Fixture::DMXFixture { mode, .. } | Fixture::Projector { mode, .. } => {
+                            match (&new_mode, &mut *mode) {
+                                (FixtureMode::ToggleOnSignal { signal_source: new_signal_source, .. }, 
+                                 FixtureMode::ToggleOnSignal { signal_source, .. }) => {
+                                    // Only update the signal_source for existing ToggleOnSignal modes
+                                    *signal_source = new_signal_source.clone();
+                                },
+                                _ => *mode = new_mode.clone(),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn compose(&mut self) {
+        if let Some(current_mode) = &self.selection_mode {
+            let new_mode = FixtureMode::ToggleOnSignal {
+                a: Box::new(current_mode.clone()),
+                b: Box::new(FixtureMode::Transparent), // Default to transparent for 'b'
+                signal_source: SignalSource {
+                    speed: 1,
+                    steps: 4,
+                    pulses: 2,
+                    transition: Transition::Instant,
+                },
+            };
+
+            for id in &self.selection {
+                if let Some(fixture) = self.fixtures.get_mut(id) {
+                    match fixture {
+                        Fixture::DMXFixture { mode, .. } | Fixture::Projector { mode, .. } => {
+                            *mode = new_mode.clone();
+                        }
+                    }
+                }
+            }
+        }
+        self.update_selection_mode();
+    }
+
+
+
+    fn is_selection_all_projectors(&self) -> bool {
+        (!self.selection.is_empty()) && self.selection.iter().all(|id| 
+            matches!(self.fixtures.get(id), Some(Fixture::Projector { .. }))
+        )
     }
 
     fn toggle_selection(&mut self) {
@@ -184,6 +265,7 @@ impl Patch{
         } else {
             self.selection.insert(self.focus);
         }
+        self.update_selection_mode();
     }
 
     fn focus_next(&mut self) {
@@ -211,6 +293,7 @@ impl Patch{
                 self.selection.insert(*id);
             }
         }
+        self.update_selection_mode();
     }
 
     fn select_all_projectors(&mut self) {
@@ -220,6 +303,7 @@ impl Patch{
                 self.selection.insert(*id);
             }
         }
+        self.update_selection_mode();
     }
 
     fn save(&self) {
@@ -228,11 +312,6 @@ impl Patch{
 
     fn load(&mut self) {
         // load fixtures from file from /presets
-    }
-
-    fn compose(&self) {
-        // load a fixtures from /presets, compose all modes
-        todo!();
     }
 
 }
@@ -263,11 +342,9 @@ ON SETTINGS
 COMPOSE SETTINGS
 x+j : decrease signal-source-steps
 x+k : increase signal-source-steps
-f+j : decrease signal-source-steps
-f+k : increase signal-source-steps
-t : iterate transition between (instant, linear)
-t+j : decrease transition duration
-t+k : increase transition duration
+f+j : decrease signal-source-pulses
+f+k : increase signal-source-pulses
+t : iterate transition between (instant, interpolate)
 
 
 Interface:
@@ -297,6 +374,7 @@ fn main() -> Result<(), io::Error> {
         Fixture::new_projector(None),
         Fixture::new_dmx_fixture(None, DMXFixtureType::Par, 1),
         Fixture::new_dmx_fixture(None, DMXFixtureType::StrobeWash, 2),
+        Fixture::new_dmx_fixture(None, DMXFixtureType::StrobeWash, 6),
     ];
 
     let mut patch = Patch::new(fixtures);
@@ -306,7 +384,7 @@ fn main() -> Result<(), io::Error> {
     let mut combine_key: Option<char> = None;
 
     loop {
-        terminal.draw(|f| ui(f, &patch))?;
+        terminal.draw(|f| ui(f, & mut patch))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -319,17 +397,39 @@ fn main() -> Result<(), io::Error> {
                     KeyCode::Char('j') => {
                         if let Some(combine) = combine_key {
                             match combine {
-                                'r' => patch.color.r = patch.color.r.saturating_sub(1),
-                                'g' => patch.color.g = patch.color.g.saturating_sub(1),
-                                'b' => patch.color.b = patch.color.b.saturating_sub(1),
-                                'z' => {
-                                    patch.current_signal_source.steps = patch.current_signal_source.steps.saturating_sub(1);
+                                'r' | 'g' | 'b' => {
+                                    if let Some(FixtureMode::On { color }) = &mut patch.selection_mode {
+                                        match combine {
+                                            'r' => color.r = color.r.saturating_sub(1),
+                                            'g' => color.g = color.g.saturating_sub(1),
+                                            'b' => color.b = color.b.saturating_sub(1),
+                                            _ => unreachable!(),
+                                        }
+                                        patch.modify_selection();
+                                    }
                                 },
-                                'x' => {
-                                    patch.current_signal_source.pulses = patch.current_signal_source.pulses.saturating_sub(1);
+                                'z' | 'x' | 'f' => {
+                                    if let Some(FixtureMode::ToggleOnSignal { signal_source, .. }) = &mut patch.selection_mode {
+                                        match combine {
+                                            'z' => signal_source.steps = signal_source.steps.saturating_sub(1),
+                                            'x' => signal_source.pulses = signal_source.pulses.saturating_sub(1),
+                                            'f' => signal_source.speed = signal_source.speed.saturating_sub(1),
+                                            _ => unreachable!(),
+                                        }
+                                        patch.modify_selection();
+                                    }
                                 },
                                 't' => {
-                                    // Increase transition duration if there is one
+                                    if let Some(FixtureMode::ToggleOnSignal { signal_source, .. }) = &mut patch.selection_mode {
+                                        signal_source.transition = match signal_source.transition {
+                                            Transition::Instant => Transition::Interpolate { ease_in: true, ease_out: false},
+                                            Transition::Interpolate { ease_in: false, ease_out: false } => Transition::Interpolate { ease_in: true, ease_out: false },
+                                            Transition::Interpolate { ease_in: true, ease_out: false } => Transition::Interpolate { ease_in: false, ease_out: true },
+                                            Transition::Interpolate { ease_in: false, ease_out: true } => Transition::Interpolate { ease_in: true, ease_out: true },
+                                            Transition::Interpolate { ease_in: true, ease_out: true, .. } => Transition::Instant,
+                                        };
+                                        patch.modify_selection();
+                                    }
                                 },
                                 _ => {}
                             }
@@ -340,17 +440,27 @@ fn main() -> Result<(), io::Error> {
                     KeyCode::Char('k') => {
                         if let Some(combine) = combine_key {
                             match combine {
-                                'r' => patch.color.r = (patch.color.r + 1).min(255),
-                                'g' => patch.color.g = (patch.color.g + 1).min(255),
-                                'b' => patch.color.b = (patch.color.b + 1).min(255),
-                                'z' => {
-                                    patch.current_signal_source.steps = (patch.current_signal_source.steps + 1).min(32);
+                                'r' | 'g' | 'b' => {
+                                    if let Some(FixtureMode::On { color }) = &mut patch.selection_mode {
+                                        match combine {
+                                            'r' => color.r = color.r.add(1).min(255),
+                                            'g' => color.g = color.g.add(1).min(255),
+                                            'b' => color.b = color.b.add(1).min(255),
+                                            _ => unreachable!(),
+                                        }
+                                        patch.modify_selection();
+                                    }
                                 },
-                                'x' => {
-                                    patch.current_signal_source.pulses = (patch.current_signal_source.pulses + 1).min(patch.current_signal_source.steps);
-                                },
-                                't' => {
-                                    // Increase transition duration if there is one
+                                'z' | 'x' | 'f' => {
+                                    if let Some(FixtureMode::ToggleOnSignal { signal_source, .. }) = &mut patch.selection_mode {
+                                        match combine {
+                                            'z' => signal_source.steps = signal_source.steps.saturating_add(1).min(32),
+                                            'x' => signal_source.pulses = signal_source.pulses.saturating_add(1).min(signal_source.steps),
+                                            'f' => signal_source.speed = signal_source.speed.saturating_add(1).min(255),
+                                            _ => unreachable!(),
+                                        }
+                                        patch.modify_selection();
+                                    }
                                 },
                                 _ => {}
                             }
@@ -359,37 +469,48 @@ fn main() -> Result<(), io::Error> {
                         }
                     }
                     KeyCode::Char('t') => {
-                        // Iterate transition between (instant, linear(no ease | ease in | ease our | ease in and ease out))
-                        // You'll need to add a field to store the current transition
+                        if let Some(FixtureMode::ToggleOnSignal { signal_source, .. }) = &mut patch.selection_mode {
+                            signal_source.transition = match signal_source.transition {
+                                Transition::Instant => Transition::Interpolate { ease_in: false, ease_out: false},
+                                Transition::Interpolate { ease_in: false, ease_out: false } => Transition::Interpolate { ease_in: true, ease_out: false },
+                                Transition::Interpolate { ease_in: true, ease_out: false } => Transition::Interpolate { ease_in: false, ease_out: true },
+                                Transition::Interpolate { ease_in: false, ease_out: true } => Transition::Interpolate { ease_in: true, ease_out: true },
+                                Transition::Interpolate { ease_in: true, ease_out: true } => Transition::Instant,
+                            };
+                            patch.modify_selection();
+                        }
                     },
 
                     KeyCode::Char(' ') => patch.toggle_selection(),
                     KeyCode::Char('s') => patch.save(),
                     KeyCode::Char('l') => patch.load(),
                     KeyCode::Char('o') => {
-                        //toggle between color and transparent
-                        match patch.selection_mode {
-                            FixtureMode::On { color: _ } => patch.selection_mode=FixtureMode::Transparent,
-                            FixtureMode::Transparent => patch.selection_mode=FixtureMode::On { color: Color::new(100, 100, 100) },
-                            _ => patch.selection_mode=FixtureMode::On { color: Color::new(100, 100, 100) }
+                        if !patch.selection.is_empty() {
+                            patch.selection_mode = match &patch.selection_mode {
+                                Some(FixtureMode::On { color: _ }) => Some(FixtureMode::Transparent),
+                                Some(FixtureMode::Transparent) => Some(FixtureMode::On { color: Color::new(100, 100, 100) }),
+                                _ => Some(FixtureMode::On { color: Color::new(100, 100, 100) })
+                            };
+                            patch.modify_selection();
                         }
-                        
-                    },
-                    KeyCode::Char('c') => {
-                        //compose
-                        todo!();
                     },
                     KeyCode::Char('p') => {
-                        //projector/iterate projector mode
-                        match patch.selection_mode {
-                            FixtureMode::Projector(ProjectorVisual::BlackAndWhite) => {
-                                patch.selection_mode = FixtureMode::Projector(ProjectorVisual::Camera);
-                            },
-                            FixtureMode::Projector(ProjectorVisual::Camera) => {
-                                patch.selection_mode = FixtureMode::Projector(ProjectorVisual::BlackAndWhite);
-                            },
-                            _ => patch.selection_mode = FixtureMode::Projector(ProjectorVisual::BlackAndWhite)
+                        if patch.is_selection_all_projectors() {
+                            patch.selection_mode = match &patch.selection_mode {
+                                Some(FixtureMode::Projector(ProjectorVisual::BlackAndWhite)) => {
+                                    Some(FixtureMode::Projector(ProjectorVisual::Camera))
+                                },
+                                Some(FixtureMode::Projector(ProjectorVisual::Camera)) => {
+                                    Some(FixtureMode::Projector(ProjectorVisual::BlackAndWhite))
+                                },
+                                _ => Some(FixtureMode::Projector(ProjectorVisual::BlackAndWhite)),
+                            };
+                            patch.modify_selection();
                         }
+                    },
+                    KeyCode::Char('c') => {
+                        patch.compose();
+                        patch.modify_selection();
                     },
                     KeyCode::Char('r') | KeyCode::Char('g') | KeyCode::Char('b') | KeyCode::Char('x') | KeyCode::Char('c') | KeyCode::Char('f')| KeyCode::Char('z') => {
                         combine_key = Some(match key.code {
@@ -409,6 +530,8 @@ fn main() -> Result<(), io::Error> {
             last_tick = Instant::now();
         }
     }
+
+    patch.modify_selection();
 
     disable_raw_mode()?;
     execute!(
@@ -459,63 +582,69 @@ fn ui<B: Backend>(f: &mut tui::Frame<B>, patch: &Patch) {
         .block(Block::default().borders(Borders::ALL).title("Fixtures"));
     f.render_widget(fixture_list, chunks[0]);
 
-    match &patch.selection_mode {
-        FixtureMode::On { color } => {
-            // On settings
-            let on_settings_text = format!(
-                "Color:\n  R: {:.2}\n  G: {:.2}\n  B: {:.2}",
-                color.r, color.g, color.b
-            );
-            let on_settings = Paragraph::new(on_settings_text)
-                .block(Block::default().borders(Borders::ALL).title("On settngs"));
-            f.render_widget(on_settings, chunks[1]);
+    if !patch.selection.is_empty() {
+        match &patch.selection_mode {
+            Some(FixtureMode::On { color }) => {
+                // On settings
+                let on_settings_text = format!(
+                    "Color:\n  R: {:.2}\n  G: {:.2}\n  B: {:.2}",
+                    color.r, color.g, color.b
+                );
+                let on_settings = Paragraph::new(on_settings_text)
+                    .block(Block::default().borders(Borders::ALL).title("On settings"));
+                f.render_widget(on_settings, chunks[1]);
+            },
 
-        },
+            Some(FixtureMode::Projector(pv)) => {
+                let mode = match pv {
+                    ProjectorVisual::Camera => "Camera",
+                    ProjectorVisual::BlackAndWhite => "B&W"
+                };
 
-        FixtureMode::Projector(pv) => {
-            let mode = match pv {
-                ProjectorVisual::Camera => "Camera",
-                ProjectorVisual::BlackAndWhite => "B&W"
-            };
+                // let projector_settings_text = 
+                let projector_settings = Paragraph::new(mode)
+                    .block(Block::default().borders(Borders::ALL).title("Projector"));
+                f.render_widget(projector_settings, chunks[1]);
+            },
 
-            // let projector_settings_text = 
-            let projector_settings = Paragraph::new(mode)
-                .block(Block::default().borders(Borders::ALL).title("Projector"));
-            f.render_widget(projector_settings, chunks[1]);
-        },
+            Some(FixtureMode::ToggleOnSignal { a, b, signal_source }) => {
+                // Compose Settings
+                let compose_settings_text = format!(
+                    "Speed: {}\n\
+                    Steps: {}\n\
+                    Pulses: {}\n\
+                    Visualization: {}\n\
+                    Transition: {}",
+                    signal_source.speed, signal_source.steps, signal_source.pulses,
+                    "□".repeat(signal_source.steps as usize).replace(&"□".repeat(signal_source.pulses as usize), "■"),
+                    signal_source.transition
+                );
+            
+                let compose_settings = Paragraph::new(compose_settings_text)
+                    .block(Block::default().borders(Borders::ALL).title("Compose Settings"));
+                f.render_widget(compose_settings, chunks[1]);
+            },
 
-        FixtureMode::ToggleOnSignal { a, b, signal_source } => {
-            // Compose Settings
-            let compose_settings_text = format!(
-                "Speed: {:.2} \n\
-                Steps: {}\n\
-                Pulses: {}\n\
-                Visualization: {}\n\
-                Transition: {}",
-                signal_source.speed, signal_source.steps, signal_source.pulses,
-                "□".repeat(signal_source.steps as usize).replace(&"□".repeat(signal_source.pulses as usize), "■"),
-                signal_source.transition
-            );
+            Some(FixtureMode::Transparent) => {
+                let transparent = Paragraph::new("")
+                    .block(Block::default().borders(Borders::ALL).title("Transparent"));
+                f.render_widget(transparent, chunks[1]);
+            },
 
-            let compose_settings = Paragraph::new(compose_settings_text)
-                .block(Block::default().borders(Borders::ALL).title("Compose Settings"));
-            f.render_widget(compose_settings, chunks[1]);
-        },
-
-        FixtureMode::Transparent => {
-            let transparent = Paragraph::new("")
-                .block(Block::default().borders(Borders::ALL).title("Transparent"));
-            f.render_widget(transparent, chunks[1]);
-        },
+            _ => ()
+        }
     }
-
     
 }
 
 
 /*
 TODO:
-[] Compose
-[] Change the actual state (colors, compositions, etc)
+[x] Change the actual state (colors, compositions, etc)
+[] Save
+[] Load
+[] Compose Choose File
 [] SignalSource
+[] get_dmx_buffer method
+[] thread that sends dmx
 */
