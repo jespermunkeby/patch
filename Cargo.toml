@@ -9,7 +9,10 @@ edition = "2021"
 termion = "1.5"
 rust_dmx = "0.5.0"
 opencv = { version = "0.92.0", features = ["clang-runtime"] }
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.0", features = ["serde", "v4"] }
 tui = "0.19.0"
 crossterm = "0.27.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
 
